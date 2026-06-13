@@ -140,11 +140,12 @@ def cmd_describe(args: argparse.Namespace) -> None:
 
 
 def _default_skill_dir() -> Path:
-    """Generic, tool-neutral skills location. Override via $SKILLS_DIR or --path."""
+    """Where to install the skill. Defaults to the Claude Code skills dir — the
+    de-facto location agents actually read. Override via $SKILLS_DIR or --path."""
     env = os.getenv("SKILLS_DIR") or os.getenv("AGENT_SKILLS_DIR")
     if env:
         return Path(env).expanduser()
-    return Path.home() / ".config" / "skills"
+    return Path.home() / ".claude" / "skills"
 
 
 def cmd_skill_install(args: argparse.Namespace) -> None:
@@ -230,7 +231,7 @@ def build_parser() -> argparse.ArgumentParser:
     sksub = sk.add_subparsers(dest="skill_command")
     sksub.required = True
     ski = sksub.add_parser("install", help="Install the bundled agent skill.")
-    ski.add_argument("--path", help="Skills dir to install into (default: ~/.config/skills).")
+    ski.add_argument("--path", help="Skills dir to install into (default: ~/.claude/skills).")
     ski.set_defaults(func=cmd_skill_install)
 
     return p
