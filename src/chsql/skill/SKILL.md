@@ -68,33 +68,32 @@ chsql query --param id=123 "SELECT * FROM events WHERE id = %(id)s LIMIT 10"
 
 ## Connection
 
-Configured via flags or environment variables (flags win):
+A connection is a single URL:
+`clickhouse://user:password@host:port/database?secure=1`. Resolution order:
+`--url` flag > `$CHSQL_URL` env > the URL stored by `chsql login` (in the OS
+keyring). Individual `--host/--port/--user/--password/--secure/--protocol/
+--database` flags override fields for ad-hoc use.
 
+If the user has run `chsql login`, plain `chsql databases` / `chsql query "..."`
+just work with **no connection flags**. For a one-off connection (e.g. the public
+playground) pass flags or a URL directly:
+
+```bash
+chsql --host play.clickhouse.com --user explorer --secure databases
+chsql --url 'clickhouse://explorer@play.clickhouse.com:9440?secure=1' databases
 ```
-CLICKHOUSE_HOST  CLICKHOUSE_PORT  CLICKHOUSE_USER  CLICKHOUSE_PASSWORD
-CLICKHOUSE_SECURE  CLICKHOUSE_DATABASE  CLICKHOUSE_PROTOCOL
-```
-
-Equivalent flags: `--host --port --user --password --secure/--no-secure
---database --protocol`. Use `--secure` for TLS endpoints.
-
-If the user has run `chsql config init`, a saved profile supplies the connection
-settings and the password (from the OS keyring or a password command), so plain
-`chsql databases` / `chsql query "..."` work with **no connection flags**. Select
-a non-default profile with `--profile NAME`. Password resolution order:
-`--password` flag > `$CLICKHOUSE_PASSWORD` > OS keyring > password command.
 
 ### Transport: native vs http
 
 - **native** (default) — fast TCP protocol, ports 9000 / 9440 (secure).
 - **http** — the HTTP(S) interface, ports 8123 / 8443 / 443. Use this when the
   server is behind an HTTPS reverse proxy that only exposes the HTTP interface
-  (a very common deployment). Requires `pip install 'chsql[http]'`.
+  (a very common deployment).
 
-`--protocol auto` (the default) picks **http** for ports 443/8123/8443 and
-**native** otherwise. If a connection to an HTTPS endpoint times out with exit
-code 2, it is almost certainly an HTTP-only server — retry with `--protocol http`
-(or point `--port` at 443/8443).
+`--protocol auto` (the default), or `?protocol=` in the URL, picks **http** for
+ports 443/8123/8443 and **native** otherwise. If a connection to an HTTPS
+endpoint times out with exit code 2, it is almost certainly an HTTP-only server —
+add `?protocol=http` to the URL (or point the port at 443/8443).
 
 ## Recipes
 

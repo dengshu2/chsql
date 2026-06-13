@@ -1,10 +1,11 @@
 """chsql — Agent-friendly ClickHouse query CLI.
 
-Subcommands: query, databases, tables, describe, skill install.
+Subcommands: query, databases, tables, describe, login, logout, skill install.
 
-Built on the standard-library ``argparse`` (no third-party CLI framework) so the
-only runtime dependency is ``clickhouse-driver`` — the whole point is to stay
-genuinely light.
+A connection is a single URL (``clickhouse://user:pass@host:port/db?secure=1``).
+Resolution order: ``--url`` flag > ``$CHSQL_URL`` env > the URL stored in the OS
+keyring by ``chsql login``. Individual ``--host/--user/...`` flags override fields
+for ad-hoc use. Built on stdlib ``argparse`` — no third-party CLI framework.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import os
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional
+from urllib.parse import quote, parse_qs, unquote, urlparse, urlunparse
 
 from . import __version__
 from . import client as ch
@@ -29,52 +31,91 @@ _FORMATS = [f.value for f in Format]
 
 
 # --------------------------------------------------------------------------- #
-# helpers
+# connection (URL) helpers
 # --------------------------------------------------------------------------- #
-def _env_bool(value: Optional[str]) -> bool:
+def _truthy(value: Optional[str]) -> bool:
     return (value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _env_int(value: Optional[str]) -> Optional[int]:
-    return int(value) if value not in (None, "") else None
+def _url_to_conn(url: Optional[str]) -> Dict[str, object]:
+    """Parse clickhouse://user:pass@host:port/db?secure=1&protocol=http into a dict."""
+    if not url:
+        return {}
+    u = urlparse(url)
+    q = parse_qs(u.query)
+    conn: Dict[str, object] = {}
+    if u.hostname:
+        conn["host"] = u.hostname
+    if u.port:
+        conn["port"] = u.port
+    if u.username:
+        conn["user"] = unquote(u.username)
+    if u.password is not None:
+        conn["password"] = unquote(u.password)
+    db = (u.path or "").strip("/")
+    if db:
+        conn["database"] = db
+    secure: Optional[bool] = True if u.scheme in ("clickhouses", "https") else None
+    if "secure" in q:
+        secure = _truthy(q["secure"][0])
+    if secure is not None:
+        conn["secure"] = secure
+    if "protocol" in q:
+        conn["protocol"] = q["protocol"][0]
+    return conn
+
+
+def _resolve_url(args: argparse.Namespace) -> Optional[str]:
+    return getattr(args, "url", None) or os.getenv("CHSQL_URL") or cfg.get_url()
 
 
 def _conn_from(args: argparse.Namespace) -> Dict[str, object]:
-    """Merge CLI flags > env (already in args) > config profile, then resolve the
-    password (flag/env > keyring > password_command)."""
-    profile = cfg.load_profile(getattr(args, "profile", None) or "default")
-
-    host = args.host or profile.get("host")
-    port = args.port or (int(profile["port"]) if profile.get("port") else None)
-    user = args.user or profile.get("user")
-    database = args.database or profile.get("database")
-    protocol = args.protocol if args.protocol != "auto" else (profile.get("protocol") or "auto")
-
-    secure = args.secure
-    if secure is None:
-        env = os.getenv("CLICKHOUSE_SECURE")
-        if env is not None:
-            secure = _env_bool(env)
-        elif "secure" in profile:
-            secure = _env_bool(profile.get("secure"))
-        else:
-            secure = False
-
-    password = args.password
-    if not password:
-        password = cfg.get_keyring_password(user or "default", host or "localhost")
-    if not password and profile.get("password_command"):
-        password = cfg.run_password_command(profile["password_command"])
-
-    return dict(host=host, port=port, user=user, password=password,
-                secure=secure, database=database, protocol=protocol)
+    """URL (flag > $CHSQL_URL > keyring) with individual flags overriding fields."""
+    base = _url_to_conn(_resolve_url(args))
+    secure = args.secure if args.secure is not None else bool(base.get("secure", False))
+    protocol = args.protocol if args.protocol != "auto" else (base.get("protocol") or "auto")
+    return {
+        "host": args.host or base.get("host"),
+        "port": args.port or base.get("port"),
+        "user": args.user or base.get("user"),
+        "password": args.password if args.password is not None else base.get("password"),
+        "secure": secure,
+        "database": args.database or base.get("database"),
+        "protocol": protocol,
+    }
 
 
 def _default_db(args: argparse.Namespace) -> str:
-    profile = cfg.load_profile(getattr(args, "profile", None) or "default")
-    return str(args.database or profile.get("database") or "default")
+    if args.database:
+        return args.database
+    db = _url_to_conn(_resolve_url(args)).get("database")
+    return str(db or "default")
 
 
+def _mask_url(url: str) -> str:
+    u = urlparse(url)
+    if u.password is None:
+        return url
+    netloc = (u.username or "") + ":***@" + (u.hostname or "")
+    if u.port:
+        netloc += f":{u.port}"
+    return urlunparse((u.scheme, netloc, u.path, u.params, u.query, u.fragment))
+
+
+def _with_password(url: str, password: str) -> str:
+    u = urlparse(url)
+    userinfo = u.username or ""
+    if password:
+        userinfo += ":" + quote(password, safe="")
+    netloc = userinfo + ("@" if userinfo else "") + (u.hostname or "")
+    if u.port:
+        netloc += f":{u.port}"
+    return urlunparse((u.scheme, netloc, u.path, u.params, u.query, u.fragment))
+
+
+# --------------------------------------------------------------------------- #
+# misc helpers
+# --------------------------------------------------------------------------- #
 def _coerce(value: str):
     """Numeric-looking param values pass through unquoted so typed columns match."""
     try:
@@ -99,6 +140,15 @@ def _parse_params(pairs: List[str]) -> Dict[str, object]:
 def _quote_ident(name: str) -> str:
     """Backtick-quote a SQL identifier, escaping embedded backticks."""
     return "`" + name.replace("`", "``") + "`"
+
+
+def _prompt(label: str, default: str = "") -> str:
+    suffix = f" [{default}]" if default else ""
+    try:
+        value = input(f"{label}{suffix}: ").strip()
+    except EOFError:
+        value = ""
+    return value or default
 
 
 # --------------------------------------------------------------------------- #
@@ -170,7 +220,6 @@ def cmd_describe(args: argparse.Namespace) -> None:
     client = ch.make_client(_conn_from(args))
     rows, columns = ch.run(client, f"DESCRIBE TABLE {ident}")
 
-    # Project the verbose DESCRIBE output down to the agent-useful columns.
     names = [c[0] for c in columns]
     want = [("name", "name"), ("type", "type"),
             ("default_expression", "default"), ("comment", "comment")]
@@ -181,10 +230,41 @@ def cmd_describe(args: argparse.Namespace) -> None:
     emit(out_rows, out_cols, args.format)
 
 
+def cmd_login(args: argparse.Namespace) -> None:
+    if args.show:
+        url = cfg.get_url()
+        print(_mask_url(url) if url else "(not logged in)")
+        return
+
+    url = args.url_arg
+    if not url:
+        if not sys.stdin.isatty():
+            errors.fail(errors.QUERY_ERROR, "no URL given")
+        url = _prompt("Connection URL (clickhouse://user@host:port?secure=1)")
+        if not url:
+            errors.fail(errors.QUERY_ERROR, "no URL given")
+        # Keep the password out of shell history: ask for it separately if absent.
+        parsed = urlparse(url)
+        if parsed.username and parsed.password is None:
+            pw = getpass.getpass("Password (blank to skip): ")
+            if pw:
+                url = _with_password(url, pw)
+
+    if not cfg.keyring_available():
+        errors.fail(errors.CONNECTION_ERROR, "no OS keyring backend available on this system")
+    cfg.set_url(url)
+    print(f"logged in — stored {_mask_url(url)} in the OS keyring")
+    print("try:  chsql databases")
+
+
+def cmd_logout(args: argparse.Namespace) -> None:
+    removed = cfg.delete_url()
+    print("logged out (keyring entry removed)" if removed else "nothing to remove")
+
+
 def _default_skill_dir() -> Path:
-    """Where to install the skill. Defaults to the cross-agent skills dir
-    (~/.agents/skills), which multiple agents read. Override via $SKILLS_DIR
-    or --path (e.g. ~/.claude/skills for Claude Code only)."""
+    """Default to the cross-agent skills dir (~/.agents/skills), which multiple
+    agents read. Override via $SKILLS_DIR or --path."""
     env = os.getenv("SKILLS_DIR") or os.getenv("AGENT_SKILLS_DIR")
     if env:
         return Path(env).expanduser()
@@ -206,148 +286,6 @@ def cmd_skill_install(args: argparse.Namespace) -> None:
     print(f"installed skill -> {dest}")
 
 
-def _prompt(label: str, default: str = "") -> str:
-    suffix = f" [{default}]" if default else ""
-    try:
-        value = input(f"{label}{suffix}: ").strip()
-    except EOFError:
-        value = ""
-    return value or default
-
-
-def _prompt_bool(label: str, default: bool = False) -> bool:
-    hint = "Y/n" if default else "y/N"
-    value = _prompt(f"{label} ({hint})")
-    if not value:
-        return default
-    return value.lower() in ("y", "yes", "1", "true", "on")
-
-
-def _parse_url(url: str):
-    """Parse clickhouse://user:pass@host:port/db?secure=1 into (settings, password)."""
-    from urllib.parse import urlparse, parse_qs
-    u = urlparse(url)
-    out: Dict[str, str] = {}
-    if u.hostname:
-        out["host"] = u.hostname
-    if u.port:
-        out["port"] = str(u.port)
-    if u.username:
-        out["user"] = u.username
-    db = (u.path or "").strip("/")
-    if db:
-        out["database"] = db
-    q = parse_qs(u.query)
-    if "secure" in q:
-        out["secure"] = q["secure"][0]
-    if u.scheme in ("clickhouses", "https"):
-        out["secure"] = "true"
-    return out, u.password
-
-
-def cmd_config_init(args: argparse.Namespace) -> None:
-    name = args.profile or "default"
-    seed: Dict[str, str] = {}
-    url_pw = None
-    if args.url:
-        seed, url_pw = _parse_url(args.url)
-    for key, val in (("host", args.host), ("user", args.user),
-                     ("database", args.database),
-                     ("port", str(args.port) if args.port else None)):
-        if val:
-            seed[key] = val
-    if args.secure is not None:
-        seed["secure"] = "true" if args.secure else "false"
-
-    interactive = sys.stdin.isatty() and not args.non_interactive
-    if interactive and not seed:
-        print(f"Configuring chsql profile '{name}'. Press Enter to accept the [default].\n")
-
-    def ask(key: str, label: str, default: str) -> str:
-        if seed.get(key):
-            return seed[key]
-        return _prompt(label, default) if interactive else default
-
-    host = ask("host", "Host", "localhost")
-    port = seed.get("port") or (_prompt("Port (blank = protocol default)", "")
-                                if interactive else "")
-    user = ask("user", "User", "default")
-    database = ask("database", "Database", "default")
-    # protocol is left to runtime auto-detection (from the port); secure is
-    # inferred from the port unless the user said otherwise.
-    if "secure" in seed:
-        secure = _env_bool(seed["secure"])
-    else:
-        secure = port.strip() in ("443", "8443", "9440")
-        if interactive:
-            secure = _prompt_bool("Use TLS (secure)?", secure)
-
-    settings: Dict[str, str] = {"host": host, "user": user, "database": database,
-                                "secure": "true" if secure else "false"}
-    if port.strip():
-        settings["port"] = port.strip()
-
-    # Password: --password-command > --password-stdin/url > interactive chooser.
-    pw = url_pw
-    if args.password_stdin:
-        pw = sys.stdin.readline().rstrip("\n") or pw
-
-    if args.password_command:
-        settings["password_command"] = args.password_command
-    elif pw is not None and pw != "":
-        if cfg.keyring_available():
-            cfg.set_keyring_password(user, host, pw)
-            print(f"stored password in keyring (account={user}@{host})")
-        else:
-            errors.fail(errors.QUERY_ERROR,
-                        "no keyring backend; pass --password-command instead")
-    elif interactive:
-        print("\nPassword storage (never written to the config file):")
-        choice = _prompt("  [k] OS keyring   [c] password command   [s] skip", "k").lower()
-        if choice.startswith("k"):
-            entered = getpass.getpass("  Password (stored in OS keyring): ")
-            if entered:
-                cfg.set_keyring_password(user, host, entered)
-                print(f"  stored in keyring (account={user}@{host})")
-        elif choice.startswith("c"):
-            command = _prompt("  Password command (e.g. "
-                              "security find-generic-password -s chsql -a USER -w)")
-            if command.strip():
-                settings["password_command"] = command.strip()
-
-    path = cfg.write_profile(name, settings)
-    print(f"wrote {path}")
-    hint = "chsql databases" if name == "default" else f"chsql --profile {name} databases"
-    print(f"try:  {hint}")
-
-
-def cmd_config_path(args: argparse.Namespace) -> None:
-    print(cfg.config_file())
-
-
-def cmd_config_edit(args: argparse.Namespace) -> None:
-    import subprocess
-    path = cfg.config_file()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if not path.exists():
-        path.write_text("", encoding="utf-8")
-    editor = os.getenv("EDITOR") or os.getenv("VISUAL") or "vi"
-    raise SystemExit(subprocess.call([editor, str(path)]))
-
-
-def cmd_config_show(args: argparse.Namespace) -> None:
-    name = args.profile or "default"
-    profile = cfg.load_profile(name)
-    if not profile:
-        errors.fail(errors.QUERY_ERROR,
-                    f"no such profile: {name} (config file: {cfg.config_file()})")
-    info = dict(profile)
-    info["_password_in_keyring"] = cfg.get_keyring_password(
-        profile.get("user", "default"), profile.get("host", "localhost")) is not None
-    info["_config_file"] = str(cfg.config_file())
-    print(json.dumps({name: info}, ensure_ascii=False, indent=2))
-
-
 # --------------------------------------------------------------------------- #
 # parser
 # --------------------------------------------------------------------------- #
@@ -363,28 +301,18 @@ def build_parser() -> argparse.ArgumentParser:
         description="Agent-friendly ClickHouse query CLI (JSON-first, read-only by default).",
     )
     p.add_argument("--version", action="version", version=f"chsql {__version__}")
-    p.add_argument("--host", default=os.getenv("CLICKHOUSE_HOST"),
-                   help="Server host (default: localhost). [env: CLICKHOUSE_HOST]")
-    p.add_argument("--port", type=int, default=_env_int(os.getenv("CLICKHOUSE_PORT")),
-                   help="Port. Default by protocol: native 9000/9440, http 8123/8443. "
-                        "[env: CLICKHOUSE_PORT]")
-    p.add_argument("--protocol", choices=["auto", "native", "http"],
-                   default=os.getenv("CLICKHOUSE_PROTOCOL") or "auto",
-                   help="Transport. auto: http for ports 443/8123/8443, else native. "
-                        "[env: CLICKHOUSE_PROTOCOL]")
-    p.add_argument("--user", "-u", default=os.getenv("CLICKHOUSE_USER"),
-                   help="User (default: default). [env: CLICKHOUSE_USER]")
-    p.add_argument("--password", default=os.getenv("CLICKHOUSE_PASSWORD"),
-                   help="Password. [env: CLICKHOUSE_PASSWORD]")
+    p.add_argument("--url", help="Connection URL (overrides $CHSQL_URL and the stored login).")
+    # Ad-hoc field overrides (no env defaults; the URL is the canonical source).
+    p.add_argument("--host", help="Override host.")
+    p.add_argument("--port", type=int, help="Override port.")
+    p.add_argument("--protocol", choices=["auto", "native", "http"], default="auto",
+                   help="Transport. auto: http for ports 443/8123/8443, else native.")
+    p.add_argument("--user", "-u", help="Override user.")
+    p.add_argument("--password", help="Override password.")
     p.add_argument("--secure", dest="secure", action="store_true", default=None,
-                   help="Use TLS (native secure port 9440). [env: CLICKHOUSE_SECURE]")
-    p.add_argument("--no-secure", dest="secure", action="store_false",
-                   help="Disable TLS.")
-    p.add_argument("--database", "-d", default=os.getenv("CLICKHOUSE_DATABASE"),
-                   help="Default database (default: default). [env: CLICKHOUSE_DATABASE]")
-    p.add_argument("--profile", default=os.getenv("CLICKHOUSE_PROFILE") or "default",
-                   help="Config profile from ~/.config/chsql/config.ini. "
-                        "[env: CLICKHOUSE_PROFILE]")
+                   help="Use TLS.")
+    p.add_argument("--no-secure", dest="secure", action="store_false", help="Disable TLS.")
+    p.add_argument("--database", "-d", help="Override default database.")
 
     sub = p.add_subparsers(dest="command")
     sub.required = True  # py3.9-compatible way to require a subcommand
@@ -417,36 +345,21 @@ def build_parser() -> argparse.ArgumentParser:
     _add_format(de)
     de.set_defaults(func=cmd_describe)
 
+    lg = sub.add_parser("login", help="Store a connection URL in the OS keyring.")
+    lg.add_argument("url_arg", nargs="?", metavar="URL",
+                    help="clickhouse://user:pass@host:port/db?secure=1 (prompts if omitted).")
+    lg.add_argument("--show", action="store_true", help="Print the stored URL (password masked).")
+    lg.set_defaults(func=cmd_login)
+
+    lo = sub.add_parser("logout", help="Remove the stored connection URL.")
+    lo.set_defaults(func=cmd_logout)
+
     sk = sub.add_parser("skill", help="Manage the chsql agent skill.")
     sksub = sk.add_subparsers(dest="skill_command")
     sksub.required = True
     ski = sksub.add_parser("install", help="Install the bundled agent skill.")
     ski.add_argument("--path", help="Skills dir to install into (default: ~/.agents/skills).")
     ski.set_defaults(func=cmd_skill_install)
-
-    cf = sub.add_parser("config", help="Manage connection config profiles.")
-    cfsub = cf.add_subparsers(dest="config_command")
-    cfsub.required = True
-    cfi = cfsub.add_parser("init", help="Create/update a profile (interactive or via flags).")
-    cfi.add_argument("--url", help="Seed from clickhouse://user:pass@host:port/db?secure=1")
-    cfi.add_argument("--host")
-    cfi.add_argument("--port", type=int)
-    cfi.add_argument("--user", "-u")
-    cfi.add_argument("--database", "-d")
-    cfi.add_argument("--secure", dest="secure", action="store_true", default=None)
-    cfi.add_argument("--no-secure", dest="secure", action="store_false")
-    cfi.add_argument("--password-stdin", action="store_true",
-                     help="Read the password from stdin and store it in the keyring.")
-    cfi.add_argument("--password-command", help="Store a command that prints the password.")
-    cfi.add_argument("--non-interactive", action="store_true",
-                     help="Never prompt; use flags/url and defaults only.")
-    cfi.set_defaults(func=cmd_config_init)
-    cfs = cfsub.add_parser("show", help="Show a profile (no secrets stored in the file).")
-    cfs.set_defaults(func=cmd_config_show)
-    cfp = cfsub.add_parser("path", help="Print the config file path.")
-    cfp.set_defaults(func=cmd_config_path)
-    cfe = cfsub.add_parser("edit", help="Open the config file in $EDITOR.")
-    cfe.set_defaults(func=cmd_config_edit)
 
     return p
 

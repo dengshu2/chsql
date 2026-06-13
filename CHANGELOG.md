@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.0
+
+- **One connection model: a URL.** `clickhouse://user:pass@host:port/db?secure=1`,
+  resolved as `--url` > `$CHSQL_URL` > the URL stored by `chsql login` (OS keyring).
+- New `chsql login [URL]` / `chsql logout` / `chsql login --show`.
+- **Removed** (breaking): `chsql config init/show/path/edit`, the
+  `~/.config/chsql/config.ini` profile file, `password_command`, named
+  `--profile`, and the `CLICKHOUSE_*` per-field env vars. Individual
+  `--host/--user/...` flags remain as ad-hoc overrides.
+- URL passwords are percent-decoded; `login` keeps the password out of shell
+  history by prompting separately when the URL omits it.
+
 ## 0.3.0
 
 - **Batteries included**: `clickhouse-connect` (HTTP transport) and `keyring`

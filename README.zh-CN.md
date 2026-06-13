@@ -9,16 +9,9 @@
 
 ## 安装
 
-推荐 **uv**（把 `chsql` 装进全局 PATH）：
-
 ```bash
-uv tool install chsql                  # 从 PyPI(即将发布)
-uv tool install -e /path/to/chsql      # 从本地源码(可编辑,改完即生效)
-```
-
-或用 **pipx**：
-
-```bash
+uv tool install chsql     # 推荐(把 chsql 装进全局 PATH)
+# 或
 pipx install chsql
 ```
 
@@ -48,43 +41,34 @@ chsql query "SELECT count() FROM system.tables"
 | `chsql databases` | 列出数据库 |
 | `chsql tables [库] --like ... --not-like ...` | 列表，含引擎和行数/字节数 |
 | `chsql describe <表 \| 库.表>` | 查看表结构（列名、类型、默认值、注释） |
-| `chsql config init\|show\|path\|edit` | 管理连接 profile |
+| `chsql login [URL] \| logout \| login --show` | 管理已保存的连接 |
 | `chsql skill install [--path 目录]` | 安装配套 Agent skill |
 | `chsql --version` | 版本号 |
 
-## 连接与凭据
+## 连接 —— 一个 URL
 
-跑一次 `chsql config init` 保存 profile，之后 `chsql databases` 零参数即可用。
-沿用 `gh` / AWS CLI 的"配置与密钥分离"：**非机密设置**写入 `~/.config/chsql/config.ini`；
-**密码绝不写进该文件**——存进系统钥匙串（同 `gh`），或用 `password_command` 查询时动态取
-（同 AWS `credential_process`）。
+一个连接就是一个 URL：
+
+```
+clickhouse://user:password@host:port/database?secure=1
+```
+
+`chsql login` 把它存进**系统钥匙串**（密码绝不落到任何配置文件），之后零参数即可用：
 
 ```bash
-# 交互式(只问 host/port/user/database + 密码后端)
-chsql config init
-
-# 一行配好(不交互):连接走 flag,密码从 stdin 进钥匙串
-echo "$PASSWORD" | chsql config init --host ch.example.com --port 443 --secure \
-  --user me --password-stdin
-
-# 或用 URL 一次性填充
-chsql config init --url 'clickhouse://me@ch.example.com:443?secure=1'
-
-chsql config show     # 查看 profile(不显示密钥)
-chsql config path     # 打印配置文件路径
-chsql config edit     # 用 $EDITOR 打开
-chsql --profile prod databases   # 使用具名 profile
+chsql login 'clickhouse://me:pw@ch.example.com:443?secure=1'   # 粘一次
+chsql databases                                                # 零参数
+chsql login --show     # 打印已存 URL(密码打码)
+chsql logout           # 删除
 ```
 
-也可用环境变量 / 命令行 flag（flag 优先）：
+解析优先级：`--url` > `$CHSQL_URL` 环境变量 > 已 login 的 URL。
+单个 `--host/--port/--user/--password/--secure/--protocol/--database` flag 可临时覆盖字段：
 
+```bash
+# 公共只读 playground —— 无需 login
+chsql --host play.clickhouse.com --user explorer --secure databases
 ```
-CLICKHOUSE_HOST  CLICKHOUSE_PORT  CLICKHOUSE_USER  CLICKHOUSE_PASSWORD
-CLICKHOUSE_SECURE  CLICKHOUSE_DATABASE  CLICKHOUSE_PROTOCOL  CLICKHOUSE_PROFILE
-```
-
-**密码解析优先级**：`--password` > `$CLICKHOUSE_PASSWORD` > 系统钥匙串 > `password_command`。
-其余设置：flag > 环境变量 > profile > 内置默认。
 
 ### 传输协议
 

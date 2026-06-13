@@ -11,16 +11,9 @@ shell instead of standing up an MCP server.
 
 ## Install
 
-Recommended — **uv** (puts `chsql` on your PATH globally):
-
 ```bash
-uv tool install chsql                  # from PyPI (coming soon)
-uv tool install -e /path/to/chsql      # from a local checkout (editable)
-```
-
-Or with **pipx**:
-
-```bash
+uv tool install chsql     # recommended (puts chsql on your PATH)
+# or
 pipx install chsql
 ```
 
@@ -43,51 +36,32 @@ Default output is **JSONEachRow** (NDJSON). Switch with
 `--format json|table|csv|tsv`. Results are capped at 100k rows by default
 (`--max-rows N`, `--max-rows 0` to disable).
 
-### Connection
+### Connection — one URL
 
-Flags or `CLICKHOUSE_*` env vars (same names as mcp-clickhouse, so migration is
-zero-config). Flags win over env.
+A connection is a single URL:
 
 ```
-CLICKHOUSE_HOST  CLICKHOUSE_PORT  CLICKHOUSE_USER  CLICKHOUSE_PASSWORD
-CLICKHOUSE_SECURE  CLICKHOUSE_DATABASE  CLICKHOUSE_PROTOCOL  CLICKHOUSE_PROFILE
+clickhouse://user:password@host:port/database?secure=1
 ```
+
+`chsql login` stores it in the **OS keyring** (the password never touches a
+config file) — then everything just works with no flags:
 
 ```bash
-# Public read-only playground (native protocol)
-chsql --secure --host play.clickhouse.com --user explorer databases
-
-# A server behind an HTTPS reverse proxy (HTTP interface on 443)
-chsql --host ch.example.com --port 443 --secure databases   # auto -> http
+chsql login 'clickhouse://me:pw@ch.example.com:443?secure=1'   # paste once
+chsql databases                                                # zero-config
+chsql login --show     # print the stored URL (password masked)
+chsql logout           # remove it
 ```
 
-### Config & credentials
-
-Run `chsql config init` once to save a connection profile — then `chsql databases`
-works with no flags. It follows the `gh` / AWS-CLI split: **non-secret settings**
-go to `~/.config/chsql/config.ini`; the **password never does** — it goes to the
-OS keyring (like `gh`) or behind a `password_command` (like AWS
-`credential_process`).
+Resolution order: `--url` flag > `$CHSQL_URL` env > the stored login. Individual
+`--host/--port/--user/--password/--secure/--protocol/--database` flags override
+fields for one-off use:
 
 ```bash
-# Interactive (asks only host/port/user/database + password backend)
-chsql config init
-
-# One-liner (no prompts): connection via flags, password from stdin into keyring
-echo "$PASSWORD" | chsql config init --host ch.example.com --port 443 --secure \
-  --user me --password-stdin
-
-# Or seed from a URL
-chsql config init --url 'clickhouse://me@ch.example.com:443?secure=1'
-
-chsql config show     # inspect a profile (no secret shown)
-chsql config path     # print config file path
-chsql config edit     # open it in $EDITOR
-chsql --profile prod databases   # use a named profile
+# Public read-only playground — no login needed
+chsql --host play.clickhouse.com --user explorer --secure databases
 ```
-
-Password resolution order: `--password` > `$CLICKHOUSE_PASSWORD` > OS keyring >
-`password_command`. All other settings: flag > env var > profile > built-in default.
 
 ### Transport
 
@@ -114,7 +88,7 @@ Password resolution order: `--password` > `$CLICKHOUSE_PASSWORD` > OS keyring >
 - `chsql databases` — list databases.
 - `chsql tables [db] --like ... --not-like ...` — list tables with engine and counts.
 - `chsql describe <table|db.table>` — list columns (name, type, default, comment).
-- `chsql config init|show|path|edit` — manage connection profiles.
+- `chsql login [URL] | logout | login --show` — manage the stored connection.
 - `chsql skill install [--path DIR]` — install the bundled agent skill.
 - `chsql --version`
 
