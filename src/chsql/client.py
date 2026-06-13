@@ -47,9 +47,11 @@ _COMMENT_RE = re.compile(r"(--[^\n]*\n)|(/\*.*?\*/)|(\s+)", re.DOTALL)
 # --------------------------------------------------------------------------- #
 # read-only guard
 # --------------------------------------------------------------------------- #
-def classify(sql: str) -> str:
-    """Return 'read', 'write', or 'ddl' based on the leading SQL keyword."""
-    stripped = sql.lstrip()
+_RANK = {"read": 0, "write": 1, "ddl": 2}
+
+
+def _classify_one(stmt: str) -> str:
+    stripped = stmt.lstrip()
     while True:
         m = _COMMENT_RE.match(stripped)
         if not m:
@@ -63,12 +65,30 @@ def classify(sql: str) -> str:
     return "read"
 
 
+def classify(sql: str) -> str:
+    """Highest privilege any statement in ``sql`` needs: 'read' < 'write' < 'ddl'.
+
+    Splits on ``;`` so a trailing ``... ; DROP TABLE x`` can't sneak past a leading
+    SELECT. The split is naive (doesn't honor ``;`` inside string literals), which
+    only ever errs toward *more* blocking in read-only mode — the safe direction.
+    """
+    worst = "read"
+    for part in sql.split(";"):
+        if not part.strip():
+            continue
+        kind = _classify_one(part)
+        if _RANK[kind] > _RANK[worst]:
+            worst = kind
+    return worst
+
+
 def _clean(exc: BaseException) -> str:
     """One-line message: drop the server-side C++ stack trace, collapse whitespace."""
     msg = str(exc)
-    cut = msg.find("Stack trace:")
-    if cut != -1:
-        msg = msg[:cut]
+    for marker in ("Stack trace:", "(for url"):
+        cut = msg.find(marker)
+        if cut != -1:
+            msg = msg[:cut]
     return " ".join(msg.split())
 
 
@@ -113,10 +133,12 @@ class _NativeClient:
             secure=c["secure"], database=c["database"], connect_timeout=10,
         )
 
-    def query(self, sql: str, params: Optional[Dict[str, Any]] = None):
+    def query(self, sql: str, params: Optional[Dict[str, Any]] = None,
+              settings: Optional[Dict[str, Any]] = None):
         from clickhouse_driver.errors import Error as CHError, NetworkError
         try:
-            return self._client.execute(sql, params=params, with_column_types=True)
+            return self._client.execute(sql, params=params, settings=settings or None,
+                                        with_column_types=True)
         except (OSError, EOFError) as exc:
             errors.fail(errors.CONNECTION_ERROR, f"connection failed: {_clean(exc)}")
         except CHError as exc:
@@ -151,10 +173,12 @@ class _HttpClient:
         except Exception as exc:  # pragma: no cover - defensive
             errors.fail(errors.CONNECTION_ERROR, f"connection failed: {_clean(exc)}")
 
-    def query(self, sql: str, params: Optional[Dict[str, Any]] = None):
+    def query(self, sql: str, params: Optional[Dict[str, Any]] = None,
+              settings: Optional[Dict[str, Any]] = None):
         from clickhouse_connect.driver.exceptions import DatabaseError, OperationalError
         try:
-            result = self._client.query(sql, parameters=params or None)
+            result = self._client.query(sql, parameters=params or None,
+                                        settings=settings or None)
             types = [getattr(t, "name", None) or str(t) for t in result.column_types]
             columns = list(zip(result.column_names, types))
             return result.result_rows, columns
@@ -172,7 +196,19 @@ def make_client(conn: Dict[str, Any]):
     return _HttpClient(resolved) if proto == "http" else _NativeClient(resolved)
 
 
-def run(client, sql: str, params: Optional[Dict[str, Any]] = None
+def row_cap_settings(max_rows: int) -> Optional[Dict[str, Any]]:
+    """Server-side settings that bound a result to ``max_rows`` (0 = unlimited).
+
+    ``result_overflow_mode='break'`` makes the server stop producing rows at the
+    cap instead of erroring — bounding client memory at the source.
+    """
+    if not max_rows or max_rows <= 0:
+        return None
+    return {"max_result_rows": max_rows, "result_overflow_mode": "break"}
+
+
+def run(client, sql: str, params: Optional[Dict[str, Any]] = None,
+        settings: Optional[Dict[str, Any]] = None
         ) -> Tuple[List[tuple], List[Tuple[str, str]]]:
     """Execute a query through a backend, returning (rows, columns)."""
-    return client.query(sql, params=params)
+    return client.query(sql, params=params, settings=settings)

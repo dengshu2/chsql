@@ -36,6 +36,9 @@ Don't guess table or column names. Discover them first:
 - Other formats: `--format json` (single object with `meta`/`data`/`rows`),
   `--format table` (human-readable), `--format csv`, `--format tsv`.
 - **stderr** carries errors as a single JSON object: `{"error": ..., "code": ...}`.
+- Results are capped at 100k rows by default. A `{"warning": ...}` line on stderr
+  means the result was truncated — re-run with `--max-rows N` (or `--max-rows 0`
+  for no cap) if you need the rest, but prefer adding `LIMIT`/filters to the SQL.
 
 ## Branch on the exit code, not on text
 

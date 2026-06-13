@@ -3,17 +3,31 @@
 English · [简体中文](README.zh-CN.md)
 
 Agent-friendly ClickHouse query CLI — **JSON-first, read-only by default,
-semantic exit codes**. A thin wrapper over `clickhouse-driver`, with **zero
-third-party CLI dependencies** (stdlib `argparse`) — ~3.5 MB installed assuming
-Python is present. Built for LLM agents to call over the shell instead of
-standing up an MCP server.
+semantic exit codes**. A thin wrapper over `clickhouse-driver` /
+`clickhouse-connect` with **zero third-party CLI framework** (stdlib `argparse`).
+Batteries included: native + HTTP transports and OS-keyring password storage all
+work out of the box (~8 MB installed). Built for LLM agents to call over the
+shell instead of standing up an MCP server.
 
 ## Install
 
+Recommended — **uv** (puts `chsql` on your PATH globally):
+
 ```bash
-pipx install chsql          # native protocol only (lightest)
-pipx install 'chsql[http]'  # + HTTP(S) interface support (proxied servers)
-chsql skill install         # drop the agent SKILL.md into your skills dir
+uv tool install chsql                  # from PyPI (coming soon)
+uv tool install -e /path/to/chsql      # from a local checkout (editable)
+```
+
+Or with **pipx**:
+
+```bash
+pipx install chsql
+```
+
+Then install the bundled agent skill (cross-agent path `~/.agents/skills`):
+
+```bash
+chsql skill install
 ```
 
 ## Use
@@ -26,7 +40,8 @@ chsql query "SELECT count() FROM system.tables"
 ```
 
 Default output is **JSONEachRow** (NDJSON). Switch with
-`--format json|table|csv|tsv`.
+`--format json|table|csv|tsv`. Results are capped at 100k rows by default
+(`--max-rows N`, `--max-rows 0` to disable).
 
 ### Connection
 
@@ -34,8 +49,8 @@ Flags or `CLICKHOUSE_*` env vars (same names as mcp-clickhouse, so migration is
 zero-config). Flags win over env.
 
 ```
-CLICKHOUSE_HOST  CLICKHOUSE_PORT  CLICKHOUSE_USER
-CLICKHOUSE_PASSWORD  CLICKHOUSE_SECURE  CLICKHOUSE_DATABASE
+CLICKHOUSE_HOST  CLICKHOUSE_PORT  CLICKHOUSE_USER  CLICKHOUSE_PASSWORD
+CLICKHOUSE_SECURE  CLICKHOUSE_DATABASE  CLICKHOUSE_PROTOCOL  CLICKHOUSE_PROFILE
 ```
 
 ```bash
@@ -50,14 +65,25 @@ chsql --host ch.example.com --port 443 --secure databases   # auto -> http
 
 Run `chsql config init` once to save a connection profile — then `chsql databases`
 works with no flags. It follows the `gh` / AWS-CLI split: **non-secret settings**
-go to `~/.config/chsql/config.ini`; the **password never does**. Store the
-password in the OS keyring (`pip install 'chsql[keyring]'`, like `gh`) or point a
-`password_command` at it (like AWS `credential_process`).
+go to `~/.config/chsql/config.ini`; the **password never does** — it goes to the
+OS keyring (like `gh`) or behind a `password_command` (like AWS
+`credential_process`).
 
 ```bash
-chsql config init                 # interactive: writes the default profile
-chsql config show                 # inspect a profile (no secret shown)
-chsql --profile prod databases    # use a named profile
+# Interactive (asks only host/port/user/database + password backend)
+chsql config init
+
+# One-liner (no prompts): connection via flags, password from stdin into keyring
+echo "$PASSWORD" | chsql config init --host ch.example.com --port 443 --secure \
+  --user me --password-stdin
+
+# Or seed from a URL
+chsql config init --url 'clickhouse://me@ch.example.com:443?secure=1'
+
+chsql config show     # inspect a profile (no secret shown)
+chsql config path     # print config file path
+chsql config edit     # open it in $EDITOR
+chsql --profile prod databases   # use a named profile
 ```
 
 Password resolution order: `--password` > `$CLICKHOUSE_PASSWORD` > OS keyring >
@@ -68,7 +94,7 @@ Password resolution order: `--password` > `$CLICKHOUSE_PASSWORD` > OS keyring >
 | Protocol | Ports | Driver | When |
 | --- | --- | --- | --- |
 | `native` (default) | 9000 / 9440 | clickhouse-driver | direct TCP access |
-| `http` | 8123 / 8443 / 443 | clickhouse-connect (`chsql[http]`) | HTTPS reverse-proxied servers |
+| `http` | 8123 / 8443 / 443 | clickhouse-connect | HTTPS reverse-proxied servers |
 
 `--protocol auto` (default) picks **http** for ports 443/8123/8443, else **native**.
 
@@ -78,7 +104,8 @@ Password resolution order: `--password` > `$CLICKHOUSE_PASSWORD` > OS keyring >
 | --- | --- |
 | Output | data → stdout (JSONEachRow by default); errors → stderr as `{"error","code"}` |
 | Exit codes | `0` ok · `1` query error · `2` connection error · `3` write/DDL blocked |
-| Safety | read-only by default; `--write` for DML, `--allow-ddl` for DDL |
+| Safety | read-only by default; `--write` for DML, `--allow-ddl` for DDL; multi-statement aware |
+| Limits | results capped at `--max-rows` (default 100k); truncation noted on stderr |
 | Params | `--param k=v` bound as `%(k)s` (numeric values passed unquoted) |
 
 ## Commands
@@ -87,7 +114,9 @@ Password resolution order: `--password` > `$CLICKHOUSE_PASSWORD` > OS keyring >
 - `chsql databases` — list databases.
 - `chsql tables [db] --like ... --not-like ...` — list tables with engine and counts.
 - `chsql describe <table|db.table>` — list columns (name, type, default, comment).
+- `chsql config init|show|path|edit` — manage connection profiles.
 - `chsql skill install [--path DIR]` — install the bundled agent skill.
+- `chsql --version`
 
 ## Develop
 
@@ -95,3 +124,7 @@ Password resolution order: `--password` > `$CLICKHOUSE_PASSWORD` > OS keyring >
 pip install -e '.[dev]'
 pytest
 ```
+
+## License
+
+MIT

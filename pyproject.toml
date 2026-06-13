@@ -1,20 +1,22 @@
 [project]
 name = "chsql"
-version = "0.2.0"
+dynamic = ["version"]
 description = "Agent-friendly ClickHouse query CLI — JSON-first, read-only by default, semantic exit codes."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "dengshu" }]
 keywords = ["clickhouse", "cli", "sql", "agent", "llm"]
+# Batteries included: native + HTTP transports and OS-keyring password storage
+# all work out of the box (~8 MB installed). Still tiny next to the 138 MB binary.
 dependencies = [
     "clickhouse-driver>=0.2.9",
+    "clickhouse-connect>=0.8",
+    "keyring>=24",
 ]
 
 [project.optional-dependencies]
-http = ["clickhouse-connect>=0.8"]
-keyring = ["keyring>=24"]
-dev = ["pytest>=7", "clickhouse-connect>=0.8", "keyring>=24"]
+dev = ["pytest>=7"]
 
 [project.scripts]
 chsql = "chsql.cli:app"
@@ -22,6 +24,9 @@ chsql = "chsql.cli:app"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/chsql/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/chsql"]

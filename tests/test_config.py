@@ -68,3 +68,24 @@ def test_flag_overrides_config(tmp_path, monkeypatch):
     conn = cli._conn_from(_args(host="fromflag", secure=False))
     assert conn["host"] == "fromflag"
     assert conn["secure"] is False  # explicit --no-secure beats config
+
+
+def test_parse_url():
+    settings, pw = cli._parse_url("clickhouse://alice:secret@h.example:9440/mydb?secure=1")
+    assert settings["host"] == "h.example" and settings["port"] == "9440"
+    assert settings["user"] == "alice" and settings["database"] == "mydb"
+    assert settings["secure"] == "1" and pw == "secret"
+
+
+def test_config_init_non_interactive(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    args = argparse.Namespace(
+        profile="default", url=None, host="ch.example", port=443, user="bob",
+        database="db", secure=None, password_stdin=False,
+        password_command="printf pw", non_interactive=True)
+    cli.cmd_config_init(args)
+    p = cfg.load_profile("default")
+    assert p["host"] == "ch.example" and p["port"] == "443" and p["user"] == "bob"
+    assert p["secure"] == "true"  # inferred from port 443
+    assert p["password_command"] == "printf pw"
+    assert "password" not in p  # never the raw secret
