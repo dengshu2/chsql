@@ -50,8 +50,17 @@ chsql query "SELECT count() FROM system.tables"
 一个连接就是一个 URL：
 
 ```
-clickhouse://user:password@host:port/database?secure=1
+clickhouse://user:password@host:port/database?secure=1&protocol=http
 ```
+
+| 部分 | 含义 |
+| --- | --- |
+| scheme | `clickhouse://`，或 `clickhouses://`（带 s 表示走 TLS） |
+| `user:password@` | 凭据（可选；密码里的 `@ : / ?` 等特殊字符需 percent 编码） |
+| `host:port` | 服务器；端口可省（按协议默认：native 9000/9440，http 8123/8443） |
+| `/database` | 默认库（可选；缺省为 `default`） |
+| `?secure=1` | 走 TLS。接受 `1/true/yes/on`。`clickhouses://` 或安全端口也会自动开启 |
+| `?protocol=` | `auto`（默认）/ `native` / `http`。`auto` 对 443/8123/8443 端口选 http，否则 native |
 
 `chsql login` 把它存进**系统钥匙串**（密码绝不落到任何配置文件），之后零参数即可用：
 

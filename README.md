@@ -41,8 +41,17 @@ Default output is **JSONEachRow** (NDJSON). Switch with
 A connection is a single URL:
 
 ```
-clickhouse://user:password@host:port/database?secure=1
+clickhouse://user:password@host:port/database?secure=1&protocol=http
 ```
+
+| Part | Meaning |
+| --- | --- |
+| scheme | `clickhouse://`, or `clickhouses://` to imply TLS |
+| `user:password@` | credentials (optional; percent-encode any `@ : / ?` in the password) |
+| `host:port` | server; port is optional (defaults per protocol: native 9000/9440, http 8123/8443) |
+| `/database` | default database (optional; defaults to `default`) |
+| `?secure=1` | use TLS. Accepts `1/true/yes/on`. Also implied by `clickhouses://` or a secure port |
+| `?protocol=` | `auto` (default), `native`, or `http`. `auto` picks http for ports 443/8123/8443, else native |
 
 `chsql login` stores it in the **OS keyring** (the password never touches a
 config file) — then everything just works with no flags:

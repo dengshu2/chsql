@@ -69,10 +69,12 @@ chsql query --param id=123 "SELECT * FROM events WHERE id = %(id)s LIMIT 10"
 ## Connection
 
 A connection is a single URL:
-`clickhouse://user:password@host:port/database?secure=1`. Resolution order:
-`--url` flag > `$CHSQL_URL` env > the URL stored by `chsql login` (in the OS
-keyring). Individual `--host/--port/--user/--password/--secure/--protocol/
---database` flags override fields for ad-hoc use.
+`clickhouse://user:password@host:port/database?secure=1&protocol=http`. Query
+params: `secure=1` (TLS; also implied by `clickhouses://` or a secure port) and
+`protocol=auto|native|http` (`auto` = http for ports 443/8123/8443, else native).
+Resolution order: `--url` flag > `$CHSQL_URL` env > the URL stored by `chsql
+login` (in the OS keyring). Individual `--host/--port/--user/--password/--secure/
+--protocol/--database` flags override fields for ad-hoc use.
 
 If the user has run `chsql login`, plain `chsql databases` / `chsql query "..."`
 just work with **no connection flags**. For a one-off connection (e.g. the public
