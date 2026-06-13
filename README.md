@@ -1,5 +1,7 @@
 # chsql
 
+English · [简体中文](README.zh-CN.md)
+
 Agent-friendly ClickHouse query CLI — **JSON-first, read-only by default,
 semantic exit codes**. A thin wrapper over `clickhouse-driver`, with **zero
 third-party CLI dependencies** (stdlib `argparse`) — ~3.5 MB installed assuming
