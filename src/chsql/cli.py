@@ -10,12 +10,14 @@ genuinely light.
 from __future__ import annotations
 
 import argparse
+import getpass
 import os
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from . import client as ch
+from . import config as cfg
 from . import errors
 from .output import Format, emit
 
@@ -34,13 +36,39 @@ def _env_int(value: Optional[str]) -> Optional[int]:
 
 
 def _conn_from(args: argparse.Namespace) -> Dict[str, object]:
-    return dict(host=args.host, port=args.port, user=args.user,
-                password=args.password, secure=args.secure, database=args.database,
-                protocol=args.protocol)
+    """Merge CLI flags > env (already in args) > config profile, then resolve the
+    password (flag/env > keyring > password_command)."""
+    profile = cfg.load_profile(getattr(args, "profile", None) or "default")
+
+    host = args.host or profile.get("host")
+    port = args.port or (int(profile["port"]) if profile.get("port") else None)
+    user = args.user or profile.get("user")
+    database = args.database or profile.get("database")
+    protocol = args.protocol if args.protocol != "auto" else (profile.get("protocol") or "auto")
+
+    secure = args.secure
+    if secure is None:
+        env = os.getenv("CLICKHOUSE_SECURE")
+        if env is not None:
+            secure = _env_bool(env)
+        elif "secure" in profile:
+            secure = _env_bool(profile.get("secure"))
+        else:
+            secure = False
+
+    password = args.password
+    if not password:
+        password = cfg.get_keyring_password(user or "default", host or "localhost")
+    if not password and profile.get("password_command"):
+        password = cfg.run_password_command(profile["password_command"])
+
+    return dict(host=host, port=port, user=user, password=password,
+                secure=secure, database=database, protocol=protocol)
 
 
 def _default_db(args: argparse.Namespace) -> str:
-    return str(args.database or "default")
+    profile = cfg.load_profile(getattr(args, "profile", None) or "default")
+    return str(args.database or profile.get("database") or "default")
 
 
 def _coerce(value: str):
@@ -164,6 +192,78 @@ def cmd_skill_install(args: argparse.Namespace) -> None:
     print(f"installed skill -> {dest}")
 
 
+def _prompt(label: str, default: str = "") -> str:
+    suffix = f" [{default}]" if default else ""
+    try:
+        value = input(f"{label}{suffix}: ").strip()
+    except EOFError:
+        value = ""
+    return value or default
+
+
+def _prompt_bool(label: str, default: bool = False) -> bool:
+    hint = "Y/n" if default else "y/N"
+    value = _prompt(f"{label} ({hint})")
+    if not value:
+        return default
+    return value.lower() in ("y", "yes", "1", "true", "on")
+
+
+def cmd_config_init(args: argparse.Namespace) -> None:
+    name = args.profile or "default"
+    print(f"Configuring chsql profile '{name}'. Press Enter to accept the [default].\n")
+    host = _prompt("Host", "localhost")
+    protocol = _prompt("Protocol (auto/native/http)", "auto")
+    port = _prompt("Port (blank = protocol default)", "")
+    secure = _prompt_bool("Use TLS (secure)?", False)
+    user = _prompt("User", "default")
+    database = _prompt("Database", "default")
+
+    settings: Dict[str, str] = {
+        "host": host, "protocol": protocol, "user": user, "database": database,
+        "secure": "true" if secure else "false",
+    }
+    if port.strip():
+        settings["port"] = port.strip()
+
+    print("\nPassword storage (the password is never written to the config file):")
+    if cfg.keyring_available():
+        choice = _prompt("  [k] OS keyring   [c] password command   [s] skip", "k").lower()
+    else:
+        print("  keyring not installed — for OS keychain run: pip install 'chsql[keyring]'")
+        choice = _prompt("  [c] password command   [s] skip", "s").lower()
+
+    if choice.startswith("k") and cfg.keyring_available():
+        pw = getpass.getpass("  Password (stored in OS keyring): ")
+        if pw:
+            cfg.set_keyring_password(user, host, pw)
+            print(f"  stored in keyring (service=chsql, account={user}@{host})")
+    elif choice.startswith("c"):
+        command = _prompt("  Password command (run at query time, e.g. "
+                          "security find-generic-password -s chsql -a USER -w)")
+        if command.strip():
+            settings["password_command"] = command.strip()
+
+    path = cfg.write_profile(name, settings)
+    print(f"\nwrote {path}")
+    hint = "chsql databases" if name == "default" else f"chsql --profile {name} databases"
+    print(f"try:  {hint}")
+
+
+def cmd_config_show(args: argparse.Namespace) -> None:
+    import json
+    name = args.profile or "default"
+    profile = cfg.load_profile(name)
+    if not profile:
+        errors.fail(errors.QUERY_ERROR,
+                    f"no such profile: {name} (config file: {cfg.config_file()})")
+    info = dict(profile)
+    info["_password_in_keyring"] = cfg.get_keyring_password(
+        profile.get("user", "default"), profile.get("host", "localhost")) is not None
+    info["_config_file"] = str(cfg.config_file())
+    print(json.dumps({name: info}, ensure_ascii=False, indent=2))
+
+
 # --------------------------------------------------------------------------- #
 # parser
 # --------------------------------------------------------------------------- #
@@ -191,13 +291,15 @@ def build_parser() -> argparse.ArgumentParser:
                    help="User (default: default). [env: CLICKHOUSE_USER]")
     p.add_argument("--password", default=os.getenv("CLICKHOUSE_PASSWORD"),
                    help="Password. [env: CLICKHOUSE_PASSWORD]")
-    p.add_argument("--secure", dest="secure", action="store_true",
-                   default=_env_bool(os.getenv("CLICKHOUSE_SECURE")),
+    p.add_argument("--secure", dest="secure", action="store_true", default=None,
                    help="Use TLS (native secure port 9440). [env: CLICKHOUSE_SECURE]")
     p.add_argument("--no-secure", dest="secure", action="store_false",
                    help="Disable TLS.")
     p.add_argument("--database", "-d", default=os.getenv("CLICKHOUSE_DATABASE"),
                    help="Default database (default: default). [env: CLICKHOUSE_DATABASE]")
+    p.add_argument("--profile", default=os.getenv("CLICKHOUSE_PROFILE") or "default",
+                   help="Config profile from ~/.config/chsql/config.ini. "
+                        "[env: CLICKHOUSE_PROFILE]")
 
     sub = p.add_subparsers(dest="command")
     sub.required = True  # py3.9-compatible way to require a subcommand
@@ -234,6 +336,14 @@ def build_parser() -> argparse.ArgumentParser:
     ski = sksub.add_parser("install", help="Install the bundled agent skill.")
     ski.add_argument("--path", help="Skills dir to install into (default: ~/.agents/skills).")
     ski.set_defaults(func=cmd_skill_install)
+
+    cf = sub.add_parser("config", help="Manage connection config profiles.")
+    cfsub = cf.add_subparsers(dest="config_command")
+    cfsub.required = True
+    cfi = cfsub.add_parser("init", help="Interactively create/update a profile.")
+    cfi.set_defaults(func=cmd_config_init)
+    cfs = cfsub.add_parser("show", help="Show a profile (no secrets stored in the file).")
+    cfs.set_defaults(func=cmd_config_show)
 
     return p
 

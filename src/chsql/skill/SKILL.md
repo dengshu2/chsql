@@ -75,6 +75,12 @@ CLICKHOUSE_SECURE  CLICKHOUSE_DATABASE  CLICKHOUSE_PROTOCOL
 Equivalent flags: `--host --port --user --password --secure/--no-secure
 --database --protocol`. Use `--secure` for TLS endpoints.
 
+If the user has run `chsql config init`, a saved profile supplies the connection
+settings and the password (from the OS keyring or a password command), so plain
+`chsql databases` / `chsql query "..."` work with **no connection flags**. Select
+a non-default profile with `--profile NAME`. Password resolution order:
+`--password` flag > `$CLICKHOUSE_PASSWORD` > OS keyring > password command.
+
 ### Transport: native vs http
 
 - **native** (default) — fast TCP protocol, ports 9000 / 9440 (secure).

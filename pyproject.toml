@@ -1,6 +1,6 @@
 [project]
 name = "chsql"
-version = "0.1.0"
+version = "0.2.0"
 description = "Agent-friendly ClickHouse query CLI — JSON-first, read-only by default, semantic exit codes."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -13,7 +13,8 @@ dependencies = [
 
 [project.optional-dependencies]
 http = ["clickhouse-connect>=0.8"]
-dev = ["pytest>=7", "clickhouse-connect>=0.8"]
+keyring = ["keyring>=24"]
+dev = ["pytest>=7", "clickhouse-connect>=0.8", "keyring>=24"]
 
 [project.scripts]
 chsql = "chsql.cli:app"

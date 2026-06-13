@@ -44,6 +44,23 @@ chsql --secure --host play.clickhouse.com --user explorer databases
 chsql --host ch.example.com --port 443 --secure databases   # auto -> http
 ```
 
+### Config & credentials
+
+Run `chsql config init` once to save a connection profile — then `chsql databases`
+works with no flags. It follows the `gh` / AWS-CLI split: **non-secret settings**
+go to `~/.config/chsql/config.ini`; the **password never does**. Store the
+password in the OS keyring (`pip install 'chsql[keyring]'`, like `gh`) or point a
+`password_command` at it (like AWS `credential_process`).
+
+```bash
+chsql config init                 # interactive: writes the default profile
+chsql config show                 # inspect a profile (no secret shown)
+chsql --profile prod databases    # use a named profile
+```
+
+Password resolution order: `--password` > `$CLICKHOUSE_PASSWORD` > OS keyring >
+`password_command`. All other settings: flag > env var > profile > built-in default.
+
 ### Transport
 
 | Protocol | Ports | Driver | When |
