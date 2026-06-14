@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.1
+
+- `chsql login` now detects a missing/unusable OS keyring (common on headless
+  servers/VPS) and points to the `$CHSQL_URL` env var instead of failing with a
+  cryptic backend error.
+- Document the connection URL query params (`secure`, `protocol`) and the
+  headless-server workflow in the READMEs and the agent skill.
+
 ## 0.4.0
 
 - **One connection model: a URL.** `clickhouse://user:pass@host:port/db?secure=1`,

@@ -14,9 +14,15 @@ KEYRING_ACCOUNT = "url"
 
 
 def keyring_available() -> bool:
+    """True only if a *usable* backend exists — not just that keyring imports.
+
+    Headless servers have keyring installed but no Secret Service / Keychain, so
+    keyring falls back to a no-op ``fail`` backend. Detect that and report False.
+    """
     try:
-        import keyring  # noqa: F401
-        return True
+        import keyring
+        from keyring.backends import fail
+        return not isinstance(keyring.get_keyring(), fail.Keyring)
     except Exception:
         return False
 

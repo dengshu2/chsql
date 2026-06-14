@@ -79,6 +79,13 @@ chsql logout           # 删除
 chsql --host play.clickhouse.com --user explorer --secure databases
 ```
 
+**无桌面的服务器 / VPS**：没有系统钥匙串，别用 `chsql login`，改用环境变量（12-factor 标准做法）：
+
+```bash
+export CHSQL_URL='clickhouse://user:pass@host:443?secure=1'   # 写进 ~/.bashrc
+chsql databases
+```
+
 ### 传输协议
 
 | 协议 | 端口 | 驱动 | 适用 |

@@ -72,6 +72,14 @@ fields for one-off use:
 chsql --host play.clickhouse.com --user explorer --secure databases
 ```
 
+**Headless servers / VPS**: there's no OS keyring, so skip `chsql login` and use
+the env var (the standard 12-factor way):
+
+```bash
+export CHSQL_URL='clickhouse://user:pass@host:443?secure=1'   # e.g. in ~/.bashrc
+chsql databases
+```
+
 ### Transport
 
 | Protocol | Ports | Driver | When |

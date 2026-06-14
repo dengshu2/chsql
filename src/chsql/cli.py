@@ -251,8 +251,17 @@ def cmd_login(args: argparse.Namespace) -> None:
                 url = _with_password(url, pw)
 
     if not cfg.keyring_available():
-        errors.fail(errors.CONNECTION_ERROR, "no OS keyring backend available on this system")
-    cfg.set_url(url)
+        errors.fail(errors.CONNECTION_ERROR,
+                    "no usable OS keyring on this system (common on headless servers/VPS). "
+                    "Skip `chsql login` and set an env var instead: "
+                    "export CHSQL_URL='clickhouse://user:pass@host:port?secure=1' — "
+                    "then run chsql normally.")
+    try:
+        cfg.set_url(url)
+    except Exception as exc:  # backend present but write failed (locked, etc.)
+        errors.fail(errors.CONNECTION_ERROR,
+                    f"could not write to the OS keyring ({exc}). "
+                    "Alternative: export CHSQL_URL='<your url>' instead of `chsql login`.")
     print(f"logged in — stored {_mask_url(url)} in the OS keyring")
     print("try:  chsql databases")
 
