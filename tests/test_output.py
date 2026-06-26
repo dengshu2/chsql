@@ -31,9 +31,23 @@ def test_csv():
     out = _run(Format.csv).splitlines()
     assert out[0] == "id,name"
     assert out[1] == "1,alice"
-    assert out[3] == "3,"  # None -> empty cell
+    assert out[3] == "3,\\N"  # None -> \N sentinel (distinct from empty string)
 
 
 def test_table():
     out = _run(Format.table)
     assert "id" in out and "name" in out and "alice" in out
+
+
+def test_tsv_null_sentinel():
+    out = _run(Format.tsv).splitlines()
+    assert out[3] == "3\t\\N"  # None -> \N, not an empty cell
+
+
+def test_duplicate_columns_not_dropped():
+    cols = [("a", "UInt8"), ("a", "UInt8")]
+    rows = [(1, 2)]
+    buf = io.StringIO()
+    emit(rows, cols, Format.jsoneachrow, out=buf)
+    # Both values survive instead of the second clobbering the first.
+    assert json.loads(buf.getvalue()) == {"a": 1, "a_1": 2}

@@ -27,8 +27,13 @@ for _name in ("clickhouse_driver", "clickhouse_connect"):
     _lg.propagate = False
 
 # Leading keyword -> category. Anything not listed is treated as a read.
-_DDL = {"CREATE", "DROP", "TRUNCATE", "RENAME", "ATTACH", "DETACH", "REPLACE"}
-_WRITE = {"INSERT", "ALTER", "DELETE", "UPDATE", "OPTIMIZE", "SYSTEM", "GRANT", "REVOKE"}
+# EXCHANGE/UNDROP are atomic structural changes; KILL/RESTORE mutate server or
+# data state — none start with an obvious DDL/write verb, so list them explicitly
+# or they'd sail through the read-only guard.
+_DDL = {"CREATE", "DROP", "TRUNCATE", "RENAME", "ATTACH", "DETACH", "REPLACE",
+        "EXCHANGE", "UNDROP"}
+_WRITE = {"INSERT", "ALTER", "DELETE", "UPDATE", "OPTIMIZE", "SYSTEM", "GRANT",
+          "REVOKE", "KILL", "RESTORE"}
 
 # ClickHouse error codes that mean "couldn't connect/authenticate", not "bad SQL".
 _CONNECTION_CODES = {
@@ -42,6 +47,14 @@ _CONNECTION_CODES = {
 _HTTP_PORTS = {443, 8123, 8443}
 _NATIVE_PORTS = {9000, 9440}
 _COMMENT_RE = re.compile(r"(--[^\n]*\n)|(/\*.*?\*/)|(\s+)", re.DOTALL)
+# clickhouse-connect surfaces the server error as text; recover the numeric code.
+_CODE_RE = re.compile(r"Code:\s*(\d+)")
+
+
+def _ch_code(exc: BaseException) -> Optional[int]:
+    """Best-effort ClickHouse error code from an exception message ('Code: 516.')."""
+    m = _CODE_RE.search(str(exc))
+    return int(m.group(1)) if m else None
 
 
 # --------------------------------------------------------------------------- #
@@ -126,12 +139,20 @@ def _resolve(conn: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
 # backends
 # --------------------------------------------------------------------------- #
 class _NativeClient:
-    def __init__(self, c: Dict[str, Any]):
-        from clickhouse_driver import Client
-        self._client = Client(
+    def __init__(self, c: Dict[str, Any], timeout: Optional[float] = None):
+        try:
+            from clickhouse_driver import Client
+        except ImportError:
+            errors.fail(errors.CONNECTION_ERROR,
+                        "native protocol requires clickhouse-driver — reinstall chsql, "
+                        "or use --protocol http with 'pip install chsql[http]'")
+        kwargs: Dict[str, Any] = dict(
             host=c["host"], port=c["port"], user=c["user"], password=c["password"],
             secure=c["secure"], database=c["database"], connect_timeout=10,
         )
+        if timeout:
+            kwargs["send_receive_timeout"] = timeout
+        self._client = Client(**kwargs)
 
     def query(self, sql: str, params: Optional[Dict[str, Any]] = None,
               settings: Optional[Dict[str, Any]] = None):
@@ -151,7 +172,7 @@ class _NativeClient:
 
 
 class _HttpClient:
-    def __init__(self, c: Dict[str, Any]):
+    def __init__(self, c: Dict[str, Any], timeout: Optional[float] = None):
         import warnings
         try:
             with warnings.catch_warnings():
@@ -163,11 +184,14 @@ class _HttpClient:
                         "HTTP protocol requires clickhouse-connect — install with: "
                         "pip install 'chsql[http]'")
         from clickhouse_connect.driver.exceptions import OperationalError
+        kwargs: Dict[str, Any] = dict(
+            host=c["host"], port=c["port"], username=c["user"], password=c["password"],
+            secure=c["secure"], database=c["database"], connect_timeout=10, query_limit=0,
+        )
+        if timeout:
+            kwargs["send_receive_timeout"] = timeout
         try:
-            self._client = clickhouse_connect.get_client(
-                host=c["host"], port=c["port"], username=c["user"], password=c["password"],
-                secure=c["secure"], database=c["database"], connect_timeout=10, query_limit=0,
-            )
+            self._client = clickhouse_connect.get_client(**kwargs)
         except OperationalError as exc:
             errors.fail(errors.CONNECTION_ERROR, f"connection failed: {_clean(exc)}")
         except Exception as exc:  # pragma: no cover - defensive
@@ -183,17 +207,27 @@ class _HttpClient:
             columns = list(zip(result.column_names, types))
             return result.result_rows, columns
         except OperationalError as exc:
-            errors.fail(errors.CONNECTION_ERROR, f"connection failed: {_clean(exc)}")
+            errors.fail(errors.CONNECTION_ERROR, f"connection failed: {_clean(exc)}",
+                        clickhouse_code=_ch_code(exc))
         except DatabaseError as exc:
-            errors.fail(errors.QUERY_ERROR, f"query failed: {_clean(exc)}")
+            # clickhouse-connect raises a bare DatabaseError for server-reported
+            # connection/auth failures too; route by code so exit codes match native.
+            code = _ch_code(exc)
+            if code in _CONNECTION_CODES:
+                errors.fail(errors.CONNECTION_ERROR,
+                            f"connection failed: {_clean(exc)}", clickhouse_code=code)
+            errors.fail(errors.QUERY_ERROR, f"query failed: {_clean(exc)}",
+                        clickhouse_code=code)
         except Exception as exc:  # pragma: no cover - defensive
             errors.fail(errors.QUERY_ERROR, f"query failed: {_clean(exc)}")
 
 
-def make_client(conn: Dict[str, Any]):
+def make_client(conn: Dict[str, Any], timeout: Optional[float] = None):
     """Build the right backend for the resolved protocol."""
     proto, resolved = _resolve(conn)
-    return _HttpClient(resolved) if proto == "http" else _NativeClient(resolved)
+    if proto == "http":
+        return _HttpClient(resolved, timeout=timeout)
+    return _NativeClient(resolved, timeout=timeout)
 
 
 def row_cap_settings(max_rows: int) -> Optional[Dict[str, Any]]:

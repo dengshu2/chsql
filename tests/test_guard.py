@@ -27,6 +27,14 @@ def test_ddl():
         assert classify(sql) == "ddl", sql
 
 
+def test_destructive_keywords_not_misread():
+    # These don't start with an obvious DDL/write verb but must not classify as read.
+    for sql in ["EXCHANGE TABLES a AND b", "UNDROP TABLE t"]:
+        assert classify(sql) == "ddl", sql
+    for sql in ["KILL MUTATION WHERE 1", "RESTORE TABLE t FROM Disk('d','b')"]:
+        assert classify(sql) == "write", sql
+
+
 def test_multi_statement_takes_highest_privilege():
     # A trailing statement must not sneak past a leading SELECT.
     assert classify("SELECT 1; DROP TABLE x") == "ddl"

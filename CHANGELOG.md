@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.5.0
+
+- **Read-only guard** now blocks `EXCHANGE`/`UNDROP` (DDL) and `KILL`/`RESTORE`
+  (write) — destructive statements that don't lead with an obvious verb and
+  previously classified as `read`.
+- **Every exit path honors the agent contract.** A top-level handler converts any
+  unexpected error into structured stderr JSON (`INTERNAL_ERROR`, exit 5) instead
+  of a raw traceback, handles `BrokenPipeError` (`… | head`) cleanly, and gives
+  native a clear message when `clickhouse-driver` is missing. Argparse usage
+  errors now emit JSON with a dedicated code (`USAGE_ERROR`, exit 4) instead of
+  plain text + exit 2, which collided with `CONNECTION_ERROR`.
+- **http backend** now routes server-reported connection/auth failures (codes
+  32/209/210/516/519) to `CONNECTION_ERROR`/exit 2 and includes `clickhouse_code`,
+  matching the native backend instead of mislabeling them `QUERY_ERROR`/exit 1.
+- **`https://` / `http://` URLs imply HTTP transport** so `https://host` (no port)
+  no longer silently resolves to the native TCP port.
+- **`--timeout SECONDS`** bounds a query (socket read + server `max_execution_time`).
+- Fixes: negative `--max-rows` no longer drops the last row; duplicate column
+  names in `json`/`jsoneachrow` are disambiguated instead of silently collapsing;
+  `csv`/`tsv` emit `\N` for NULL (distinct from an empty string); a malformed
+  connection URL (bad port) and a failed `skill install` write report clean JSON
+  errors instead of tracebacks.
+
 ## 0.4.1
 
 - `chsql login` now detects a missing/unusable OS keyring (common on headless

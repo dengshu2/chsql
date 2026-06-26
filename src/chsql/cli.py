@@ -46,8 +46,12 @@ def _url_to_conn(url: Optional[str]) -> Dict[str, object]:
     conn: Dict[str, object] = {}
     if u.hostname:
         conn["host"] = u.hostname
-    if u.port:
-        conn["port"] = u.port
+    try:
+        port = u.port
+    except ValueError:
+        errors.fail(errors.QUERY_ERROR, f"invalid connection URL: bad port in {url!r}")
+    if port:
+        conn["port"] = port
     if u.username:
         conn["user"] = unquote(u.username)
     if u.password is not None:
@@ -55,13 +59,18 @@ def _url_to_conn(url: Optional[str]) -> Dict[str, object]:
     db = (u.path or "").strip("/")
     if db:
         conn["database"] = db
-    secure: Optional[bool] = True if u.scheme in ("clickhouses", "https") else None
+    scheme = (u.scheme or "").lower()
+    secure: Optional[bool] = True if scheme in ("clickhouses", "https") else None
     if "secure" in q:
         secure = _truthy(q["secure"][0])
     if secure is not None:
         conn["secure"] = secure
+    # Explicit ?protocol= wins; otherwise an http(s):// scheme implies HTTP transport
+    # so https://host (no port) doesn't silently resolve to native TCP.
     if "protocol" in q:
         conn["protocol"] = q["protocol"][0]
+    elif scheme in ("http", "https"):
+        conn["protocol"] = "http"
     return conn
 
 
@@ -169,22 +178,26 @@ def cmd_query(args: argparse.Namespace) -> None:
 
     params = _parse_params(args.param) if args.param else None
     max_rows = DEFAULT_MAX_ROWS if args.max_rows is None else args.max_rows
-    client = ch.make_client(_conn_from(args))
-    rows, columns = ch.run(client, sql, params=params,
-                           settings=ch.row_cap_settings(max_rows))
-    # Server-side cap bounds memory (~max_rows + one block); slice to exactly N.
-    truncated = bool(max_rows) and len(rows) > max_rows
+    # Normalize once: anything <= 0 means unlimited, on both the server and client side.
+    cap = max_rows if max_rows and max_rows > 0 else 0
+    settings = ch.row_cap_settings(cap) or {}
+    if args.timeout:
+        settings["max_execution_time"] = args.timeout
+    client = ch.make_client(_conn_from(args), timeout=args.timeout)
+    rows, columns = ch.run(client, sql, params=params, settings=settings or None)
+    # Server-side cap bounds memory (~cap + one block); slice to exactly N.
+    truncated = cap > 0 and len(rows) > cap
     if truncated:
-        rows = rows[:max_rows]
+        rows = rows[:cap]
     emit(rows, columns, args.format)
     if truncated:
-        print(json.dumps({"warning": f"result truncated to {max_rows} rows; "
+        print(json.dumps({"warning": f"result truncated to {cap} rows; "
                                      "raise or disable with --max-rows (0 = unlimited)"},
                          ensure_ascii=False), file=sys.stderr)
 
 
 def cmd_databases(args: argparse.Namespace) -> None:
-    client = ch.make_client(_conn_from(args))
+    client = ch.make_client(_conn_from(args), timeout=args.timeout)
     rows, columns = ch.run(client, "SELECT name FROM system.databases ORDER BY name")
     emit(rows, columns, args.format)
 
@@ -202,7 +215,7 @@ def cmd_tables(args: argparse.Namespace) -> None:
         params["not_like"] = args.not_like
     sql += " ORDER BY name"
 
-    client = ch.make_client(_conn_from(args))
+    client = ch.make_client(_conn_from(args), timeout=args.timeout)
     rows, columns = ch.run(client, sql, params=params)
     emit(rows, columns, args.format)
 
@@ -217,7 +230,7 @@ def cmd_describe(args: argparse.Namespace) -> None:
     # DESCRIBE TABLE works regardless of system.columns access filtering, and
     # raises a clean "unknown table" error (exit 1) when the table is missing.
     ident = f"{_quote_ident(db)}.{_quote_ident(tbl)}"
-    client = ch.make_client(_conn_from(args))
+    client = ch.make_client(_conn_from(args), timeout=args.timeout)
     rows, columns = ch.run(client, f"DESCRIBE TABLE {ident}")
 
     names = [c[0] for c in columns]
@@ -289,9 +302,12 @@ def cmd_skill_install(args: argparse.Namespace) -> None:
 
     base = Path(args.path).expanduser() if args.path else _default_skill_dir()
     target = base / "chsql"
-    target.mkdir(parents=True, exist_ok=True)
     dest = target / "SKILL.md"
-    dest.write_text(content, encoding="utf-8")
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        dest.write_text(content, encoding="utf-8")
+    except OSError as exc:
+        errors.fail(errors.QUERY_ERROR, f"could not install skill to {dest}: {exc}")
     print(f"installed skill -> {dest}")
 
 
@@ -304,8 +320,16 @@ def _add_format(p: argparse.ArgumentParser) -> None:
                    help="Output format (default: jsoneachrow).")
 
 
+class _Parser(argparse.ArgumentParser):
+    """Emit usage errors through the structured-error contract instead of argparse's
+    plain text + exit 2 (which collides with CONNECTION_ERROR)."""
+
+    def error(self, message: str):  # noqa: D401 - argparse hook
+        errors.fail(errors.USAGE_ERROR, f"usage error: {message}")
+
+
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
+    p = _Parser(
         prog="chsql",
         description="Agent-friendly ClickHouse query CLI (JSON-first, read-only by default).",
     )
@@ -322,6 +346,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Use TLS.")
     p.add_argument("--no-secure", dest="secure", action="store_false", help="Disable TLS.")
     p.add_argument("--database", "-d", help="Override default database.")
+    p.add_argument("--timeout", type=float, default=None, metavar="SECONDS",
+                   help="Bound a query: socket read + server max_execution_time "
+                        "(default: none — the driver's 300s applies).")
 
     sub = p.add_subparsers(dest="command")
     sub.required = True  # py3.9-compatible way to require a subcommand
@@ -374,10 +401,27 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def app() -> None:
-    """Console-script entry point."""
+    """Console-script entry point.
+
+    Every exit path honors the agent contract: errors land on stderr as JSON with a
+    stable exit code, never a raw traceback.
+    """
     parser = build_parser()
     args = parser.parse_args()
-    args.func(args)
+    try:
+        args.func(args)
+    except SystemExit:
+        raise  # errors.fail() and argparse already emitted their structured exit
+    except BrokenPipeError:
+        # Downstream closed the pipe (e.g. `chsql query ... | head`). Redirect stdout
+        # to devnull so the interpreter's shutdown flush doesn't re-raise.
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        raise SystemExit(0)
+    except KeyboardInterrupt:
+        raise SystemExit(130)
+    except Exception as exc:
+        errors.fail(errors.INTERNAL_ERROR, f"internal error: {type(exc).__name__}: {exc}")
 
 
 if __name__ == "__main__":  # pragma: no cover

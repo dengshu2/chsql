@@ -15,6 +15,8 @@ SUCCESS = 0
 QUERY_ERROR = 1       # SQL is invalid / server rejected the query
 CONNECTION_ERROR = 2  # could not reach / authenticate with the server
 PERMISSION_ERROR = 3  # a write/DDL was blocked by the read-only guard
+USAGE_ERROR = 4       # bad CLI invocation (unknown flag, missing subcommand)
+INTERNAL_ERROR = 5    # an unexpected error escaped the command handler
 
 
 def fail(code: int, message: str, **extra) -> "SystemExit":
